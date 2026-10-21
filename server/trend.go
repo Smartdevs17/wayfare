@@ -43,6 +43,10 @@ type TrendJSON struct {
 	// history from a failed request without inspecting the array.
 	Count int `json:"count"`
 
+	// Next is the sequence cursor to fetch the next older page of runs
+	// via ?before=seq. Omitted when there are no older runs.
+	Next int64 `json:"next,omitempty"`
+
 	// Runs is oldest first. An array, never null, so a client can iterate
 	// it without a nil check when the history is empty.
 	Runs []TrendRunJSON `json:"runs"`
@@ -211,8 +215,8 @@ type MovementJSON struct {
 	// Signed decimal strings in percent. BenchmarkPct is corridor-free;
 	// CorridorPct is benchmark-free; LossPctChange is the headline move in
 	// percentage points.
-	BenchmarkPct string `json:"benchmark_pct,omitempty"`
-	CorridorPct  string `json:"corridor_pct,omitempty"`
+	BenchmarkPct  string `json:"benchmark_pct,omitempty"`
+	CorridorPct   string `json:"corridor_pct,omitempty"`
 	LossPctChange string `json:"loss_pct_change,omitempty"`
 }
 
@@ -232,13 +236,14 @@ func toMovementJSON(m *runstore.Movement) MovementJSON {
 	}
 }
 
-func toTrendJSON(recs []*runstore.Record, key, pair string, send, recv asset.Asset) TrendJSON {
+func toTrendJSON(recs []*runstore.Record, key, pair string, send, recv asset.Asset, next int64) TrendJSON {
 	out := TrendJSON{
 		Corridor:             key,
 		SendAsset:            route.ToAssetJSON(send),
 		ReceiveAsset:         route.ToAssetJSON(recv),
 		ReferencePair:        pair,
 		Count:                len(recs),
+		Next:                 next,
 		Runs:                 make([]TrendRunJSON, 0, len(recs)),
 		IntegrityTransitions: make([]IntegrityTransitionJSON, 0),
 		Movements:            make([]MovementJSON, 0),
@@ -314,7 +319,7 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusMethodNotAllowed, codeMethodNotAllowed, "only GET is supported")
 		return
 	}
-	if err := checkParams(r, "from", "to", "limit", "pretty"); err != nil {
+	if err := checkParams(r, "from", "to", "limit", "before", "pretty"); err != nil {
 		writeError(w, r, http.StatusBadRequest, codeInvalidQuery, err.Error())
 		return
 	}
@@ -349,6 +354,12 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	before, err := parseTrendBefore(r)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, codeInvalidCursor, err.Error())
+		return
+	}
+
 	// The pair was fixed by the assets' pegs at measurement time, so the
 	// stored runs and this document describe the same benchmark question.
 	pegQuote, _ := asset.FiatPeg(recvAsset)
@@ -360,21 +371,30 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 	key := runstore.CorridorKey(from, to)
 
 	var recs []*runstore.Record
+	var nextCursor int64
 	if s.Store != nil {
-		recent, err := s.Store.Recent(r.Context(), key, limit)
+		// Read limit + 1 to detect whether an older page exists.
+		recent, err := s.Store.RecentBefore(r.Context(), key, limit+1, before)
 		if err != nil {
 			writeError(w, r, http.StatusInternalServerError, codeStoreRead, "reading stored history: "+err.Error())
 			return
 		}
-		// Recent is newest first because its callers want the latest
+		hasMore := len(recent) > limit
+		if hasMore {
+			recent = recent[:limit]
+		}
+		// RecentBefore is newest first because its callers want the latest
 		// record; a timeline reads oldest first, so reverse.
 		recs = make([]*runstore.Record, 0, len(recent))
 		for i := len(recent) - 1; i >= 0; i-- {
 			recs = append(recs, recent[i])
 		}
+		if hasMore && len(recs) > 0 {
+			nextCursor = recs[0].Seq
+		}
 	}
 
-	trend := toTrendJSON(recs, key, pair, sendAsset, recvAsset)
+	trend := toTrendJSON(recs, key, pair, sendAsset, recvAsset, nextCursor)
 
 	stats, err := analysis.DivergenceHistory(recs)
 	if err != nil {
@@ -409,6 +429,28 @@ func parseTrendLimit(raw string) (int, error) {
 	}
 	if n > maxTrendLimit {
 		n = maxTrendLimit
+	}
+	return n, nil
+}
+
+// parseTrendBefore validates the sequence cursor for backwards pagination.
+//
+// If before is not provided, it returns 0 and no cursor filter is applied.
+// An invalid, non-integer, or non-positive cursor is a client error (400).
+func parseTrendBefore(r *http.Request) (int64, error) {
+	if !r.URL.Query().Has("before") {
+		return 0, nil
+	}
+	raw := strings.TrimSpace(r.URL.Query().Get("before"))
+	if raw == "" {
+		return 0, fmt.Errorf("bad cursor %q: must be a whole number", raw)
+	}
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("bad cursor %q: must be a whole number", raw)
+	}
+	if n <= 0 {
+		return 0, fmt.Errorf("bad cursor %q: must be positive", raw)
 	}
 	return n, nil
 }
