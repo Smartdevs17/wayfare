@@ -314,8 +314,50 @@ func (s *Scheduler) measure(ctx context.Context, c Corridor) error {
 	if err := s.store().Append(ctx, record); err != nil {
 		s.log().Error("recording measurement failed",
 			"corridor", c.Key(), "error", err)
+		return nil
 	}
+
+	// The run is stored, so the corridor's structure can now be compared
+	// with the run before it. A corridor moving from DIRECT to NO-MARKET
+	// is the single most important event this monitor can observe, and
+	// until now nothing called the detector that finds it: the change was
+	// visible only by diffing stored records by hand.
+	s.reportTransition(ctx, c.Key())
 	return nil
+}
+
+// reportTransition logs the corridor's most recent structural change, when
+// the store records one.
+//
+// The comparison is the two most recent stored runs, so a corridor whose
+// structure has not moved says nothing at all. The absence of a transition
+// is the normal case, not a missing observation, and logging it would bury
+// the events that matter.
+//
+// UNKNOWN is excluded by the detector itself, so a transient upstream
+// failure cannot raise a structural alarm here: the same reasoning that
+// keeps a monitor that cries wolf from being muted.
+func (s *Scheduler) reportTransition(ctx context.Context, corridor string) {
+	transition, err := runstore.DetectLatestTransition(ctx, s.store(), corridor)
+	if err != nil {
+		// A failed read is not a failed measurement. The record is
+		// stored, and the next sweep will compare against it.
+		s.log().Error("integrity transition check failed",
+			"corridor", corridor, "error", err)
+		return
+	}
+	if transition == nil {
+		return
+	}
+	s.log().Warn("corridor integrity transition",
+		"corridor", corridor,
+		"previous_integrity", transition.PreviousIntegrity,
+		"current_integrity", transition.CurrentIntegrity,
+		"transition_type", transition.TransitionType.String(),
+		"previous_run_at", transition.PreviousRunAt.UTC().Format(time.RFC3339),
+		"current_run_at", transition.CurrentRunAt.UTC().Format(time.RFC3339),
+		"previous_depends_on", transition.PreviousDependsOn,
+		"current_depends_on", transition.CurrentDependsOn)
 }
 
 func formatTime(t time.Time) string {

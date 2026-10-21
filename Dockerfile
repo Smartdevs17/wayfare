@@ -4,11 +4,11 @@
 # keys and moves no funds, but it does publish figures under Wayfare's name,
 # and the smallest possible surface is the cheapest way to keep it that way.
 
-# golang:1.27.2-alpine, pinned by digest so the same commit builds against the
+# golang:1.27.3-alpine, pinned by digest so the same commit builds against the
 # same bytes. The tag stays in the reference — Dependabot's docker ecosystem
 # uses it to know which release to move to (.github/dependabot.yml) — and the
 # digest is what actually fixes the image.
-FROM golang:1.27.2-alpine@sha256:f92b6ef800e499660581efdabdf25d9d817a9d124eaf900924f0504e7e27e12d AS build
+FROM golang:1.27.3-alpine@sha256:cd410a5c6686417875bc4815688e96ae9769f8562debc545d29fe58e73d174f0 AS build
 
 WORKDIR /src
 

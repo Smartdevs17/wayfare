@@ -184,6 +184,77 @@ func TestTrendServesIntegrityTransitions(t *testing.T) {
 	}
 }
 
+// TestTrendExposesLatestTransition pins the field issue #579 asks for: the
+// most recent structural change, named with both states, so a reader does not
+// have to diff two records by hand to learn that a corridor moved kind.
+//
+// It is the same event as the last element of integrity_transitions, so the
+// two can never disagree.
+func TestTrendExposesLatestTransition(t *testing.T) {
+	base := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
+	seeds := []trendSeed{
+		{at: base, integrity: "DIRECT", mid: "1350", source: "currency-api", loss: "5", verdict: "FAIR"},
+		{at: base.Add(6 * time.Hour), integrity: "DERIVATIVE", dependsOn: []string{"NGNC"}, mid: "1350", source: "currency-api", loss: "5", verdict: "FAIR"},
+		{at: base.Add(12 * time.Hour), integrity: "NO-MARKET", mid: "1350", source: "currency-api", loss: "5", verdict: "FAIR"},
+	}
+	srv := trendServer(t, seedTrendStore(t, seeds))
+
+	status, body := getJSON(t, srv.URL+"/api/corridor/trend?to=NGNC")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %v", status, body)
+	}
+	latest, ok := body["latest_transition"].(map[string]any)
+	if !ok {
+		t.Fatalf("latest_transition must be an object when the window establishes a transition, got %v", body["latest_transition"])
+	}
+	if latest["previous_integrity"] != "DERIVATIVE" || latest["current_integrity"] != "NO-MARKET" {
+		t.Errorf("latest_transition = %v -> %v, want DERIVATIVE -> NO-MARKET",
+			latest["previous_integrity"], latest["current_integrity"])
+	}
+	if latest["transition_type"] != "INTEGRITY_STATE_CHANGE" {
+		t.Errorf("transition_type = %v, want INTEGRITY_STATE_CHANGE", latest["transition_type"])
+	}
+	if latest["current_run_at"] != seeds[2].at.Format(time.RFC3339) {
+		t.Errorf("current_run_at = %v, want %s", latest["current_run_at"], seeds[2].at.Format(time.RFC3339))
+	}
+
+	// The named transition and the series must be the same event.
+	transitions, _ := body["integrity_transitions"].([]any)
+	if len(transitions) != 2 {
+		t.Fatalf("integrity_transitions = %d, want 2", len(transitions))
+	}
+	last := transitions[len(transitions)-1].(map[string]any)
+	if last["previous_integrity"] != latest["previous_integrity"] || last["current_integrity"] != latest["current_integrity"] {
+		t.Errorf("latest_transition %v disagrees with the last entry of integrity_transitions %v",
+			latest, last)
+	}
+}
+
+// TestTrendLatestTransitionIsNullWhenNoneEstablished covers the honest
+// absence: a window that establishes no transition reports null rather than
+// omitting the field, so a client can tell "nothing changed" from "this
+// build does not report transitions". A single run has nothing to compare,
+// and that is a different answer from a transition.
+func TestTrendLatestTransitionIsNullWhenNoneEstablished(t *testing.T) {
+	base := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
+	seeds := []trendSeed{
+		{at: base, integrity: "DIRECT", mid: "1350", source: "currency-api", loss: "5", verdict: "FAIR"},
+	}
+	srv := trendServer(t, seedTrendStore(t, seeds))
+
+	status, body := getJSON(t, srv.URL+"/api/corridor/trend?to=NGNC")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %v", status, body)
+	}
+	raw, present := body["latest_transition"]
+	if !present {
+		t.Fatal("latest_transition must always be present, so a client cannot miss it")
+	}
+	if raw != nil {
+		t.Errorf("latest_transition = %v, want null for a history of one run", raw)
+	}
+}
+
 // TestTrendWithNoHistoryIsEmptyNotError covers both halves of the empty case:
 // an opened-but-empty store, and no store at all. Both must answer 200 with
 // an empty array, because a missing history is the answer, not a failure,

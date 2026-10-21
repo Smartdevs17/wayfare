@@ -573,6 +573,14 @@ as zero. Below the documented minimum sample size (30 observations —
 rule), `determined` is `false` and `reason` says why; `mean_pct`, `stddev_pct`
 and the trend fields are then absent rather than a precise-looking number.
 
+The response also names the corridor's structural changes: `integrity_transitions`
+lists every determined change between consecutive runs in the window, and
+`latest_transition` is the most recent of them with both states named — so
+"this corridor moved from DIRECT to NO-MARKET" is readable without diffing two
+records by hand. A pair involving `UNKNOWN` is never reported: it cannot
+establish that structure changed. The scheduler writes the same comparison to
+its log after every sweep.
+
 ### UI
 
 The interface is one embedded file, `server/index.html`. Its light and dark

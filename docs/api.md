@@ -319,6 +319,25 @@ establish that structure changed. An empty array means no such transition was
 established in the window. The series is descriptive and does not alter a
 verdict or integrity state.
 
+`latest_transition` is the most recent structural change in that window — the
+same event as the last entry of `integrity_transitions`, named on its own
+because "this corridor changed kind" is the one fact a reader should not have
+to diff two records by hand to find. It carries the same fields:
+`previous_integrity`, `current_integrity`, `previous_run_at`,
+`current_run_at`, `previous_depends_on`, `current_depends_on` and
+`transition_type` (`INTEGRITY_STATE_CHANGE` or `DEPENDS_ON_CHANGED`).
+
+It is `null` when the window establishes no transition: a history of one run
+has nothing to compare, and two runs that agree are not a change. It is
+`null` rather than absent, so a client can tell "nothing changed" from "this
+build does not report transitions". A window of fewer than two runs therefore
+always reports `null` — raise `limit` to at least 2 for the comparison to be
+possible.
+
+The monitor writes the same comparison to its log after every sweep
+(`docs/deployment.md`), so a reader who wants the event as it happened can
+watch the log rather than poll the endpoint.
+
 **cURL:**
 
 ```bash
@@ -335,6 +354,8 @@ curl -s "https://wayfare-cdb9.onrender.com/api/corridor/trend?to=NGNC&limit=7"
   "receive_asset": {"code": "NGNC", "issuer": "GASBV6W7GGED66MXEVC7YZHTWWYMSVYEY35USF2HJZBLABLYIFQGXZY6", "peg": "NGN"},
   "reference_pair": "USD/NGN",
   "count": 1,
+  "integrity_transitions": [],
+  "latest_transition": null,
   "runs": [
     {
       "seq": 1,

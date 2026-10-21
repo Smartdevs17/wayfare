@@ -56,13 +56,17 @@ type TrendJSON struct {
 	// are omitted by runstore's integrity-transition contract.
 	IntegrityTransitions []IntegrityTransitionJSON `json:"integrity_transitions"`
 
-	// Movements is the benchmark-vs-corridor movement decomposition over the
-	// same window (issue #637): one entry per consecutive pair that
-	// established any movement, oldest pair first. Empty array, never null,
-	// so a client can iterate without a nil check. Empty means no pair
-	// established a movement — fewer than two runs, or no pair with both a
-	// scorable benchmark and a priced rung — never "no movement happened".
-	Movements []MovementJSON `json:"movements"`
+	// LatestTransition is the most recent structural change in the window
+	// above — the same event as the last element of IntegrityTransitions,
+	// named on its own because "this corridor changed kind" is the one fact
+	// a reader should not have to diff two records to find.
+	//
+	// Null when the window establishes no transition: a history of one run
+	// has nothing to compare, and two runs that agree are not a change. It
+	// is null rather than absent, so a client can tell "no transition" from
+	// "this build does not report transitions". It never alters a run's
+	// integrity state or verdict.
+	LatestTransition *IntegrityTransitionJSON `json:"latest_transition"`
 
 	// DivergenceStats summarises how far the corridor's two reference
 	// providers have disagreed across the runs above — a fact about the
@@ -251,11 +255,19 @@ func toTrendJSON(recs []*runstore.Record, key, pair string, send, recv asset.Ass
 	for _, rec := range recs {
 		out.Runs = append(out.Runs, toTrendRunJSON(rec))
 	}
-	for _, transition := range runstore.TransitionsFromRecords(recs) {
+	transitions := runstore.TransitionsFromRecords(recs)
+	for _, transition := range transitions {
 		out.IntegrityTransitions = append(out.IntegrityTransitions, toIntegrityTransitionJSON(transition))
 	}
-	for _, movement := range runstore.MovementsFromRecords(recs) {
-		out.Movements = append(out.Movements, toMovementJSON(movement))
+	// The last transition in the window is the corridor's latest one: the
+	// window ends at the newest stored run, so — as long as it holds at
+	// least two runs — the pair the detector itself compares (the two most
+	// recent) is the pair this series ends with. A window of one run has
+	// nothing to compare and reports no transition, which is why the field
+	// is null rather than absent.
+	if len(transitions) > 0 {
+		latest := toIntegrityTransitionJSON(transitions[len(transitions)-1])
+		out.LatestTransition = &latest
 	}
 	return out
 }
