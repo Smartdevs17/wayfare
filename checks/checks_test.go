@@ -836,6 +836,145 @@ func TestSEP24InfoNotDeclaredIsUndetermined(t *testing.T) {
 	}
 }
 
+func TestSEP6InfoListsAssetFromSnapshot(t *testing.T) {
+	cases := []struct {
+		name       string
+		published  bool
+		status     int
+		body       string
+		determined bool
+		passed     bool
+		contains   string
+	}{
+		{
+			name:       "not published",
+			determined: false,
+			contains:   "declares no TRANSFER_SERVER",
+		},
+		{
+			name:      "published and lists asset",
+			published: true, status: http.StatusOK,
+			body:       `{"deposit":{"NGN":{"enabled":true}},"withdraw":{"NGN":{"enabled":false}}}`,
+			determined: true, passed: true,
+			contains: "deposit enabled; withdrawal disabled",
+		},
+		{
+			name:      "published and unavailable",
+			published: true, status: http.StatusServiceUnavailable,
+			body:       `{"error":"temporarily unavailable"}`,
+			determined: true, passed: false,
+			contains: "HTTP 503",
+		},
+		{
+			name:      "published but omits asset",
+			published: true, status: http.StatusOK,
+			body:       `{"deposit":{"USD":{"enabled":true}},"withdraw":{}}`,
+			determined: true, passed: false,
+			contains: "omits asset \"NGN\"",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := sep6SnapshotClient(t, tc.published, tc.status, tc.body)
+			runner := &Runner{
+				Checks:   []Check{SEP6InfoListsAsset{HTTPClient: client}},
+				Resolver: &anchor.Resolver{HTTPClient: client},
+			}
+			findings := runner.ForAsset(ctx(), asset.NGNC())
+			if len(findings.Checks) != 1 {
+				t.Fatalf("runner returned %d checks, want 1", len(findings.Checks))
+			}
+			result := findings.Checks[0]
+			if result.Determined != tc.determined || (tc.determined && result.Passed != tc.passed) {
+				t.Fatalf("result determined=%v passed=%v, want %v/%v (%s)",
+					result.Determined, result.Passed, tc.determined, tc.passed, result.Summary)
+			}
+			if !strings.Contains(result.Summary+" "+result.Reason, tc.contains) {
+				t.Errorf("result %q / %q does not mention %q", result.Summary, result.Reason, tc.contains)
+			}
+			if result.Determined && len(result.Evidence) == 0 {
+				t.Error("a determined result must carry evidence")
+			}
+		})
+	}
+}
+
+func TestSEP6CheckRunsInDefaultSuite(t *testing.T) {
+	for _, check := range (&Runner{}).Default() {
+		if _, ok := check.(SEP6InfoListsAsset); ok {
+			return
+		}
+	}
+	t.Error("SEP6InfoListsAsset is not in the default check set")
+}
+
+func sep6SnapshotClient(t *testing.T, published bool, infoStatus int, infoBody string) *http.Client {
+	t.Helper()
+
+	const currency = `[[CURRENCIES]]
+code="NGNC"
+issuer="GASBV6W7GGED66MXEVC7YZHTWWYMSVYEY35USF2HJZBLABLYIFQGXZY6"
+anchor_asset="NGN"
+`
+	var serverURL string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/.well-known/stellar.toml":
+			if published {
+				_, _ = fmt.Fprintf(w, "TRANSFER_SERVER = %q\n\n%s", serverURL+"/sep6", currency)
+				return
+			}
+			_, _ = io.WriteString(w, currency)
+		case "/sep6/info":
+			w.WriteHeader(infoStatus)
+			_, _ = io.WriteString(w, infoBody)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	serverURL = server.URL
+
+	corridor := snapshot.Corridor{
+		Send:          snapshot.AssetRef{Code: "USDC", Issuer: asset.USDCIssuer},
+		Receive:       snapshot.AssetRef{Code: "NGNC", Issuer: asset.NGNCIssuer},
+		ReferencePair: "USD/NGN",
+	}
+	recorder := &snapshot.Recorder{
+		Corridor: corridor,
+		Sizes:    []string{"100"},
+		Notes:    []string{"Responses captured from the local SEP-6 test server."},
+	}
+	capture := &http.Client{Transport: recorder}
+	paths := []string{"/.well-known/stellar.toml"}
+	if published {
+		paths = append(paths, "/sep6/info")
+	}
+	for _, path := range paths {
+		resp, err := capture.Get(server.URL + path)
+		if err != nil {
+			t.Fatalf("capturing %s: %v", path, err)
+		}
+		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+			t.Fatalf("reading %s: %v", path, err)
+		}
+		if err := resp.Body.Close(); err != nil {
+			t.Fatalf("closing %s: %v", path, err)
+		}
+	}
+
+	dir := filepath.Join(t.TempDir(), snapshot.DirName(corridor, recorder.RecordedAt()))
+	if err := recorder.Save(dir); err != nil {
+		t.Fatalf("saving snapshot: %v", err)
+	}
+	manifest, err := snapshot.Load(dir)
+	if err != nil {
+		t.Fatalf("loading snapshot: %v", err)
+	}
+	return manifest.HTTPClient()
+}
+
 func TestSEP12ServerPublished(t *testing.T) {
 	cases := []struct {
 		name       string

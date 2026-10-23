@@ -169,16 +169,13 @@ func (s *Server) uiHandler() http.Handler {
 			http.NotFound(w, r)
 			return
 		}
-		data := uiPageData{Summary: s.summaryFor(r.Context())}
-		var buf bytes.Buffer
-		if err := uiTemplate.Execute(&buf, data); err != nil {
-			body, err := uiFS.ReadFile("index.html")
-			if err != nil {
-				http.Error(w, "ui unavailable", http.StatusInternalServerError)
-				return
-			}
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			_, _ = w.Write(body)
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			writeError(w, r, http.StatusMethodNotAllowed, codeMethodNotAllowed, "only GET and HEAD are supported")
+			return
+		}
+		body, err := uiFS.ReadFile("index.html")
+		if err != nil {
+			http.Error(w, "ui unavailable", http.StatusInternalServerError)
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")

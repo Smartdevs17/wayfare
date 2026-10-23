@@ -51,8 +51,10 @@ type Server struct {
 	// only which is tried first.
 	HistoryFirst bool
 
-	// Timeout bounds a single corridor measurement. A full ladder is a
-	// dozen round trips to Horizon, so this is generous by HTTP standards.
+	// Timeout bounds a single corridor measurement. One Horizon call per
+	// rung, plus a two-call slippage probe on each rung above the probe
+	// threshold, so the count scales with route.DefaultSizes rather than
+	// staying a fixed dozen; this is still generous by HTTP standards.
 	// It is the ceiling: the budget a request actually gets is derived from
 	// its rung count (see budgetFor) and never exceeds this.
 	Timeout time.Duration
@@ -352,11 +354,17 @@ func (s *Server) handleCorridor(w http.ResponseWriter, r *http.Request) {
 
 	out := route.ToCorridorJSON(res, pegBase+"/"+pegQuote)
 
-	// Checks run after the measurement and cannot alter it. route.WithFindings
-	// is the only composition point and branches on nothing — see the
-	// composition rule in docs/checks.md.
+	// Checks and metrics run after the measurement and cannot alter it.
+	// route.WithFindings is the only composition point and branches on
+	// nothing — see the composition rule in docs/checks.md.
 	if s.Checks != nil {
-		out = route.WithFindings(out, s.Checks.ForAsset(ctx, recvAsset))
+		out = route.WithFindings(out, s.Checks.ForCorridor(ctx, checks.Corridor{
+			Send:       sendAsset,
+			Receive:    recvAsset,
+			Integrity:  res.Integrity.String(),
+			Underlying: underlyingPair(res),
+			Reference:  res.Reference,
+		}))
 	}
 
 	writeJSON(w, r, http.StatusOK, out)
@@ -377,6 +385,19 @@ func (s *Server) handleCorridor(w http.ResponseWriter, r *http.Request) {
 		"live", actualLive,
 		"integrity", out.Integrity,
 		"duration", time.Since(started).Round(time.Millisecond).String())
+}
+
+// underlyingPair names the pair a DERIVATIVE corridor's paths traverse, when
+// the ladder identified exactly one. It exists so a book metric measures the
+// market that actually exists instead of reporting "no book" for a corridor
+// whose liquidity sits one hop away. More than one dependency stays empty:
+// there is no single pair to measure, and guessing one would attribute that
+// market's spread to this corridor.
+func underlyingPair(res *route.LadderResult) asset.Asset {
+	if res == nil || res.Integrity != route.IntegrityDerivative || len(res.DependsOn) != 1 {
+		return asset.Asset{}
+	}
+	return res.DependsOn[0]
 }
 
 func (s *Server) handleAssets(w http.ResponseWriter, r *http.Request) {
@@ -579,6 +600,10 @@ func (s *Server) healthFreshness(ctx context.Context) healthFreshnessJSON {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		writeError(w, r, http.StatusMethodNotAllowed, codeMethodNotAllowed, "only GET and HEAD are supported")
+		return
+	}
 	if err := checkParams(r, "pretty"); err != nil {
 		writeError(w, r, http.StatusBadRequest, codeInvalidQuery, err.Error())
 		return

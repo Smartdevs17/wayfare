@@ -32,6 +32,13 @@ settings below exist to prevent it.
 
 ## Two ways to run it continuously
 
+The hosted scheduler runs its first sweep immediately. Each later sweep waits
+the configured `-schedule` interval plus a random delay in the range
+`[0, -schedule-jitter)`. The defaults are six hours and five minutes; setting
+`-schedule-jitter=0` disables the offset. The interval is the base gap, not a
+fixed wall-clock time, and the random delay is selected separately for each
+process run.
+
 **Scheduled CI** (`.github/workflows/measure.yml`) — a workflow measures every
 six hours and commits the hash-chained store back to the repository. No host,
 no bill, and one repository secret ([below](#running-the-ci-path)).
@@ -298,9 +305,12 @@ hours.
 
 ## Load on upstreams
 
-One sweep is roughly three dozen Horizon calls per corridor — twelve sizes,
-each with pathfinding plus a slippage probe — across three corridors, so about
-110 requests every six hours. That is negligible for Horizon at this cadence.
+One sweep is roughly sixty-eight Horizon calls across the three corridors —
+NGNC and GHSC each run twelve rungs with pathfinding plus a slippage probe on
+rungs above the probe threshold (28 calls each); KESC short-circuits as
+NO-MARKET after twelve pathfinding calls (12) — plus about twelve counterparty
+requests and two reference-provider calls, near eighty requests every six
+hours. That is negligible for Horizon at this cadence.
 
 The reference providers are hit roughly **once per run** rather than once per
 rung, because `refrate.Cached` collapses a ladder's twelve identical rate

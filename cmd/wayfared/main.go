@@ -51,8 +51,10 @@ func main() {
 			"ceiling on a live measurement; the budget per request scales with rung count up to this")
 		shutdownGrace = flag.Duration("shutdown-grace", 30*time.Second,
 			"how long SIGTERM waits for in-flight requests before closing")
-		dataDir   = flag.String("data", envOr("WAYFARE_DATA_DIR", ""), "directory for the run store; empty disables history")
-		schedule  = flag.Duration("schedule", monitor.DefaultInterval, "measurement interval; 0 disables the scheduler")
+		dataDir        = flag.String("data", envOr("WAYFARE_DATA_DIR", ""), "directory for the run store; empty disables history")
+		schedule       = flag.Duration("schedule", monitor.DefaultInterval, "measurement interval; 0 disables the scheduler")
+		scheduleJitter = flag.Duration("schedule-jitter", monitor.DefaultJitter,
+			"maximum random delay added to each measurement interval; 0 disables jitter")
 		serve     = flag.Bool("serve", true, "serve HTTP")
 		verify    = flag.Bool("verify-store", false, "verify every corridor chain and exit")
 		rotate    = flag.Bool("rotate-store", false, "trim every chain over the window ceiling and exit")
@@ -176,6 +178,7 @@ func main() {
 	if *schedule > 0 {
 		sched := newScheduler(engine, store, *dataDir, *horizon, logger)
 		sched.Interval = *schedule
+		sched.Jitter = *scheduleJitter
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

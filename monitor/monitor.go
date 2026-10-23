@@ -17,6 +17,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math/rand"
 	"time"
 
 	"github.com/Wayfare-labs/wayfare/asset"
@@ -74,6 +75,9 @@ func DefaultCorridors() []Corridor {
 // inside both rate providers' free tiers once refrate.Cached is in the stack.
 const DefaultInterval = 6 * time.Hour
 
+// DefaultJitter is the maximum random delay added to each scheduled interval.
+const DefaultJitter = 5 * time.Minute
+
 // Scheduler measures corridors on an interval and records the results.
 type Scheduler struct {
 	Engine    *route.Engine
@@ -97,6 +101,13 @@ type Scheduler struct {
 	// Interval is the gap between sweeps. Zero means DefaultInterval.
 	Interval time.Duration
 
+	// Jitter is the maximum random delay added to Interval. Zero disables it.
+	Jitter time.Duration
+
+	// JitterSeed makes the interval sequence reproducible when set. Nil uses
+	// a time-based seed.
+	JitterSeed *int64
+
 	// Logger is where run outcomes go. Nil means slog.Default.
 	Logger *slog.Logger
 
@@ -116,6 +127,21 @@ func (s *Scheduler) interval() time.Duration {
 		return s.Interval
 	}
 	return DefaultInterval
+}
+
+func (s *Scheduler) nextInterval(rng *rand.Rand) time.Duration {
+	if s.Jitter <= 0 {
+		return s.interval()
+	}
+	return s.interval() + time.Duration(rng.Int63n(int64(s.Jitter)))
+}
+
+func (s *Scheduler) randomSource() *rand.Rand {
+	seed := time.Now().UnixNano()
+	if s.JitterSeed != nil {
+		seed = *s.JitterSeed
+	}
+	return rand.New(rand.NewSource(seed))
 }
 
 func (s *Scheduler) corridors() []Corridor {
@@ -150,6 +176,7 @@ func (s *Scheduler) Run(ctx context.Context) error {
 
 	s.log().Info("scheduler starting",
 		"interval", s.interval().String(),
+		"jitter", s.Jitter.String(),
 		"corridors", len(s.corridors()))
 
 	if err := s.RunOnce(ctx); err != nil && ctx.Err() == nil {
@@ -160,15 +187,16 @@ func (s *Scheduler) Run(ctx context.Context) error {
 		s.log().Error("initial sweep failed", "error", err)
 	}
 
-	ticker := time.NewTicker(s.interval())
-	defer ticker.Stop()
+	rng := s.randomSource()
 
 	for {
+		timer := time.NewTimer(s.nextInterval(rng))
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			s.log().Info("scheduler stopping", "reason", ctx.Err())
 			return ctx.Err()
-		case <-ticker.C:
+		case <-timer.C:
 			if err := s.RunOnce(ctx); err != nil && ctx.Err() == nil {
 				s.log().Error("sweep failed", "error", err)
 			}
@@ -261,7 +289,13 @@ func (s *Scheduler) measure(ctx context.Context, c Corridor) error {
 		return fmt.Errorf("monitor: snapshot checks require a recorder-backed checks factory")
 	}
 	if checkRunner != nil {
-		live = route.WithFindings(live, checkRunner.ForAsset(ctx, c.Receive))
+		live = route.WithFindings(live, checkRunner.ForCorridor(ctx, checks.Corridor{
+			Send:       c.Send,
+			Receive:    c.Receive,
+			Integrity:  result.Integrity.String(),
+			Underlying: underlyingPair(result),
+			Reference:  result.Reference,
+		}))
 	}
 	record := runstore.FromCorridorJSON(live)
 	record.RecordedAt = started
@@ -324,6 +358,18 @@ func (s *Scheduler) measure(ctx context.Context, c Corridor) error {
 	// visible only by diffing stored records by hand.
 	s.reportTransition(ctx, c.Key())
 	return nil
+}
+
+// underlyingPair names the pair a DERIVATIVE corridor's paths traverse, when
+// the ladder identified exactly one. It mirrors the server's helper: a book
+// metric should measure the market that exists rather than report "no book" for
+// a corridor whose liquidity sits one hop away, and more than one dependency
+// stays empty because there is no single pair to measure.
+func underlyingPair(res *route.LadderResult) asset.Asset {
+	if res == nil || res.Integrity != route.IntegrityDerivative || len(res.DependsOn) != 1 {
+		return asset.Asset{}
+	}
+	return res.DependsOn[0]
 }
 
 // reportTransition logs the corridor's most recent structural change, when
